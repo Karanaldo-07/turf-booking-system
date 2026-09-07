@@ -104,7 +104,7 @@ export default function AdminPage() {
           ['Active turfs', stats.activeTurfs],
           ['Bookings', stats.totalBookings],
           ['Paid bookings', stats.paidBookings],
-          ['Revenue', `₹${stats.revenue}`]
+          ['Net revenue', `₹${stats.revenue}`]
         ].map(([label, value]) => <div key={label} className="rounded-2xl border bg-white p-5 dark:border-gray-800 dark:bg-gray-900"><p className="text-sm text-gray-500">{label}</p><p className="mt-2 text-2xl font-black">{value}</p></div>)}
       </div>
 
@@ -137,12 +137,12 @@ export default function AdminPage() {
       </section>
 
       <section className="space-y-3">
-        <div><h2 className="text-xl font-bold">All bookings</h2><p className="text-sm text-gray-500">Payment status is separate from the booking status.</p></div>
+        <div><h2 className="text-xl font-bold">All bookings</h2><p className="text-sm text-gray-500">Payment and refund status are separate from booking status.</p></div>
         {!loading && !bookings.length && <div className="rounded-2xl border border-dashed p-8 text-center text-sm text-gray-500">No bookings yet.</div>}
         {bookings.map((b) => (
           <div key={b._id} className="rounded-2xl border bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div><p className="font-bold">{b.user?.name || 'User'} · {b.turf?.name || 'Turf'}</p><p className="text-sm text-gray-500">{b.date} • {formatHour(b.startHour)}–{formatHour(b.endHour)} • ₹{b.totalPrice}</p><div className="mt-2 flex flex-wrap gap-2"><span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold dark:bg-gray-800">{b.status}</span><span className="rounded-full bg-green-50 px-2.5 py-1 text-xs font-semibold text-green-700 dark:bg-green-950/40 dark:text-green-300">{b.paymentStatus}</span></div></div>
+              <div><p className="font-bold">{b.user?.name || 'User'} · {b.turf?.name || 'Turf'}</p><p className="text-sm text-gray-500">{b.date} • {formatHour(b.startHour)}–{formatHour(b.endHour)} • ₹{b.totalPrice}</p><div className="mt-2 flex flex-wrap gap-2"><span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold dark:bg-gray-800">{b.status}</span><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${b.paymentStatus === 'refunded' ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300' : b.paymentStatus === 'paid' ? 'bg-green-50 text-green-700 dark:bg-green-950/40 dark:text-green-300' : 'bg-gray-100 dark:bg-gray-800'}`}>{b.paymentStatus}</span>{b.refundStatus && b.refundStatus !== 'not_applicable' && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">refund: {b.refundStatus}</span>}</div></div>
               <div className="flex gap-2">
                 {b.status !== 'approved' && b.status !== 'cancelled' && <button onClick={() => updateStatus(b._id, 'approved')} className="rounded-lg bg-green-600 px-3 py-2 text-sm font-semibold text-white">Approve</button>}
                 {b.status !== 'cancelled' && <button onClick={() => updateStatus(b._id, 'cancelled')} className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 dark:border-red-900">Cancel</button>}
