@@ -96,7 +96,7 @@ const createBooking = async (req, res) => {
   }
 
   try {
-    const booking = await Booking.create({ user: req.user._id, turf: turfId, date, startHour: start, endHour: end, duration, totalPrice, slotKeys, notes: typeof notes === 'string' ? notes.trim() : undefined, razorpayOrderId: order.id, status: 'pending', paymentStatus: 'pending', expiresAt: new Date(Date.now() + BOOKING_HOLD_MINUTES * 60 * 1000) });
+    const booking = await Booking.create({ user: req.user._id, turf: turfId, date, startHour: start, endHour: end, duration, totalPrice, slotKeys, notes: typeof notes === 'string' ? notes.trim() : undefined, razorpayOrderId: order.id, status: 'pending', paymentStatus: 'pending', refundStatus: 'not_applicable', expiresAt: new Date(Date.now() + BOOKING_HOLD_MINUTES * 60 * 1000) });
     res.status(201).json({ booking, order, mockPayment: Boolean(order.mock), razorpayKeyId: process.env.RAZORPAY_KEY_ID || null });
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ message: 'Selected slot was just booked by someone else. Please choose another time.' });
@@ -151,21 +151,69 @@ const confirmPayment = async (req, res) => {
   }
 
   booking.paymentStatus = 'paid';
+  booking.refundStatus = 'not_applicable';
   booking.status = 'approved';
   booking.expiresAt = null;
   await booking.save();
   res.json({ message: `Booking confirmed for ${booking.turf.name}`, booking });
 };
 
+const refundPaidBooking = async (booking) => {
+  if (booking.paymentStatus !== 'paid' || !booking.razorpayPaymentId) return;
+  if (booking.refundStatus === 'processed') return;
+
+  booking.refundStatus = 'pending';
+  await booking.save();
+
+  const isMock = booking.razorpayOrderId?.startsWith('mock_order_');
+  if (isMock) {
+    booking.paymentStatus = 'refunded';
+    booking.refundStatus = 'processed';
+    await booking.save();
+    return;
+  }
+
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    booking.refundStatus = 'failed';
+    await booking.save();
+    throw new Error('Payment refund is not configured.');
+  }
+
+  try {
+    const razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+    const refund = await razorpay.payments.refund(booking.razorpayPaymentId, {
+      amount: Math.round(booking.totalPrice * 100),
+      notes: { booking_id: String(booking._id), reason: 'Customer booking cancellation' }
+    });
+    booking.razorpayRefundId = refund.id;
+    booking.paymentStatus = 'refunded';
+    booking.refundStatus = ['processed', 'created'].includes(refund.status) ? 'processed' : 'pending';
+    await booking.save();
+  } catch (error) {
+    booking.refundStatus = 'failed';
+    await booking.save();
+    throw error;
+  }
+};
+
 const cancelMyBooking = async (req, res) => {
   const booking = await Booking.findOne({ _id: req.params.id, user: req.user._id });
   if (!booking) return res.status(404).json({ message: 'Booking not found' });
   if (booking.status === 'cancelled') return res.status(400).json({ message: 'Booking is already cancelled' });
+
+  if (booking.paymentStatus === 'paid') {
+    try {
+      await refundPaidBooking(booking);
+    } catch (_error) {
+      return res.status(502).json({ message: 'Refund could not be initiated. The booking was not cancelled.' });
+    }
+  }
+
   booking.status = 'cancelled';
   booking.slotKeys = [];
   booking.expiresAt = null;
   await booking.save();
-  res.json({ message: 'Booking cancelled successfully', booking });
+  res.json({ message: booking.paymentStatus === 'refunded' ? 'Booking cancelled and refund initiated successfully.' : 'Booking cancelled successfully', booking });
 };
 
 const updateBookingStatus = async (req, res) => {
@@ -173,6 +221,15 @@ const updateBookingStatus = async (req, res) => {
   if (!['pending', 'approved', 'cancelled'].includes(status)) return res.status(400).json({ message: 'Invalid booking status' });
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+  if (status === 'cancelled' && booking.paymentStatus === 'paid') {
+    try {
+      await refundPaidBooking(booking);
+    } catch (_error) {
+      return res.status(502).json({ message: 'Refund could not be initiated. The booking was not cancelled.' });
+    }
+  }
+
   booking.status = status;
   if (status === 'cancelled') {
     booking.slotKeys = [];
