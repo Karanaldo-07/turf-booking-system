@@ -3,17 +3,12 @@ import { Link } from 'react-router-dom';
 import http from '../api/http';
 import { useAuth } from '../context/AuthContext';
 
-const formatHour = (hour) => {
-  const h = hour % 12 || 12;
-  return `${h}:00 ${hour < 12 ? 'AM' : 'PM'}`;
-};
-
+const formatHour = (hour) => `${hour % 12 || 12}:00 ${hour < 12 ? 'AM' : 'PM'}`;
 const getLocalDate = () => {
   const now = new Date();
   const offset = now.getTimezoneOffset();
   return new Date(now.getTime() - offset * 60 * 1000).toISOString().slice(0, 10);
 };
-
 const loadRazorpay = () => new Promise((resolve, reject) => {
   if (window.Razorpay) return resolve(true);
   const script = document.createElement('script');
@@ -22,7 +17,6 @@ const loadRazorpay = () => new Promise((resolve, reject) => {
   script.onerror = () => reject(new Error('Unable to load payment checkout.'));
   document.body.appendChild(script);
 });
-
 const TURF_IMAGE_FALLBACK = '/turf-placeholder.svg';
 
 export default function HomePage() {
@@ -36,17 +30,14 @@ export default function HomePage() {
   const { user } = useAuth();
 
   useEffect(() => {
-    http.get('/turfs')
-      .then(({ data }) => {
-        setTurfs(data);
-        if (data[0]) {
-          const first = data[0];
-          const startHour = Math.min(Math.max(18, first.availableHours?.start ?? 6), (first.availableHours?.end ?? 23) - 1);
-          setForm((prev) => ({ ...prev, turfId: first._id, startHour, endHour: startHour + 1 }));
-        }
-      })
-      .catch(() => setMessage({ type: 'error', text: 'Unable to load turfs. Please refresh.' }))
-      .finally(() => setLoading(false));
+    http.get('/turfs').then(({ data }) => {
+      setTurfs(data);
+      if (data[0]) {
+        const first = data[0];
+        const startHour = Math.min(Math.max(18, first.availableHours?.start ?? 6), (first.availableHours?.end ?? 23) - 1);
+        setForm((prev) => ({ ...prev, turfId: first._id, startHour, endHour: startHour + 1 }));
+      }
+    }).catch(() => setMessage({ type: 'error', text: 'Unable to load turfs. Please refresh.' })).finally(() => setLoading(false));
   }, []);
 
   const selectedTurf = useMemo(() => turfs.find((t) => t._id === form.turfId), [turfs, form.turfId]);
@@ -55,83 +46,56 @@ export default function HomePage() {
   const totalPrice = selectedTurf && end > start ? (end - start) * selectedTurf.basePricePerHour : 0;
   const minDate = getLocalDate();
 
-  useEffect(() => {
-    if (!form.turfId || !form.date) {
-      setAvailability(null);
-      return;
-    }
-
+  const refreshAvailability = async () => {
+    if (!form.turfId || !form.date) return;
     setAvailabilityLoading(true);
-    http.get('/bookings/availability', { params: { turfId: form.turfId, date: form.date } })
-      .then(({ data }) => {
-        setAvailability(data);
-        const available = data.availableHours || [];
-        const currentStartAvailable = available.includes(Number(form.startHour));
-        const nextStart = currentStartAvailable ? Number(form.startHour) : available[0];
-        if (nextStart !== undefined) {
-          const possibleEnd = available.includes(nextStart + 1) ? nextStart + 1 : nextStart + 1;
-          setForm((prev) => ({ ...prev, startHour: nextStart, endHour: possibleEnd }));
-        }
-      })
-      .catch(() => setAvailability(null))
-      .finally(() => setAvailabilityLoading(false));
-  }, [form.turfId, form.date]);
-
-  const isHourAvailable = (hour) => !availability || availability.availableHours?.includes(hour);
-  const isRangeAvailable = (rangeStart, rangeEnd) => {
-    if (!availability) return true;
-    for (let hour = rangeStart; hour < rangeEnd; hour += 1) {
-      if (!availability.availableHours?.includes(hour)) return false;
-    }
-    return true;
+    try {
+      const { data } = await http.get('/bookings/availability', { params: { turfId: form.turfId, date: form.date } });
+      setAvailability(data);
+      const available = data.availableHours || [];
+      const current = available.includes(Number(form.startHour));
+      const nextStart = current ? Number(form.startHour) : available[0];
+      if (nextStart !== undefined) {
+        setForm((prev) => ({ ...prev, startHour: nextStart, endHour: available.includes(nextStart + 1) ? nextStart + 1 : nextStart + 1 }));
+      }
+    } catch {
+      setAvailability(null);
+      setMessage({ type: 'error', text: 'Could not refresh availability. Please try again.' });
+    } finally { setAvailabilityLoading(false); }
   };
 
-  const startOptions = selectedTurf
-    ? Array.from({ length: Math.max(0, selectedTurf.availableHours.end - selectedTurf.availableHours.start - 1) }, (_, index) => selectedTurf.availableHours.start + index)
-      .filter(isHourAvailable)
-    : [];
+  useEffect(() => { refreshAvailability(); }, [form.turfId, form.date]);
 
+  const isRangeAvailable = (rangeStart, rangeEnd) => {
+    if (!availability) return true;
+    for (let hour = rangeStart; hour < rangeEnd; hour += 1) if (!availability.availableHours?.includes(hour)) return false;
+    return true;
+  };
+  const startOptions = selectedTurf
+    ? Array.from({ length: Math.max(0, selectedTurf.availableHours.end - selectedTurf.availableHours.start - 1) }, (_, i) => selectedTurf.availableHours.start + i).filter((h) => !availability || availability.availableHours?.includes(h))
+    : [];
   const endOptions = selectedTurf
-    ? Array.from({ length: Math.max(0, selectedTurf.availableHours.end - start) }, (_, index) => start + 1 + index)
-      .filter((hour) => isRangeAvailable(start, hour))
+    ? Array.from({ length: Math.max(0, selectedTurf.availableHours.end - start) }, (_, i) => start + 1 + i).filter((h) => isRangeAvailable(start, h))
     : [];
 
   const confirmMockBooking = async (bookingData) => {
-    const payment = await http.post('/bookings/confirm-payment', {
-      bookingId: bookingData.booking._id,
-      razorpayOrderId: bookingData.order.id,
-      razorpayPaymentId: `mock_payment_${Date.now()}`
-    });
+    const payment = await http.post('/bookings/confirm-payment', { bookingId: bookingData.booking._id, razorpayOrderId: bookingData.order.id, razorpayPaymentId: `mock_payment_${Date.now()}` });
     setMessage({ type: 'success', text: payment.data.message });
   };
 
   const openRazorpay = async (bookingData) => {
     await loadRazorpay();
     if (!bookingData.razorpayKeyId) throw new Error('Payment configuration is missing.');
-
     await new Promise((resolve, reject) => {
       const checkout = new window.Razorpay({
-        key: bookingData.razorpayKeyId,
-        amount: bookingData.order.amount,
-        currency: bookingData.order.currency,
-        name: 'Turf Booking',
-        description: `${selectedTurf.name} • ${bookingData.booking.duration} hour(s)`,
-        order_id: bookingData.order.id,
+        key: bookingData.razorpayKeyId, amount: bookingData.order.amount, currency: bookingData.order.currency,
+        name: 'Turf Booking', description: `${selectedTurf.name} • ${bookingData.booking.duration} hour(s)`, order_id: bookingData.order.id,
         prefill: { name: user?.name || '', email: user?.email || '', contact: user?.phone || '' },
-        theme: { color: '#16a34a' },
         handler: async (response) => {
           try {
-            const payment = await http.post('/bookings/confirm-payment', {
-              bookingId: bookingData.booking._id,
-              razorpayOrderId: response.razorpay_order_id,
-              razorpayPaymentId: response.razorpay_payment_id,
-              razorpaySignature: response.razorpay_signature
-            });
-            setMessage({ type: 'success', text: payment.data.message });
-            resolve();
-          } catch (error) {
-            reject(new Error(error.response?.data?.message || 'Payment verification failed.'));
-          }
+            const payment = await http.post('/bookings/confirm-payment', { bookingId: bookingData.booking._id, razorpayOrderId: response.razorpay_order_id, razorpayPaymentId: response.razorpay_payment_id, razorpaySignature: response.razorpay_signature });
+            setMessage({ type: 'success', text: payment.data.message }); resolve();
+          } catch (error) { reject(new Error(error.response?.data?.message || 'Payment verification failed.')); }
         },
         modal: { ondismiss: () => reject(new Error('Payment was cancelled. Your slot is held temporarily and will expire automatically.')) }
       });
@@ -145,21 +109,16 @@ export default function HomePage() {
     setMessage({ type: '', text: '' });
     if (!user) return setMessage({ type: 'error', text: 'Please login or register before booking.' });
     if (!selectedTurf || end <= start) return setMessage({ type: 'error', text: 'Please choose a valid time range.' });
-    if (!isRangeAvailable(start, end)) return setMessage({ type: 'error', text: 'One or more selected hours are no longer available. Please refresh the slot list.' });
-
+    if (!startOptions.length || !endOptions.length) return setMessage({ type: 'error', text: 'No valid slot is available. Please choose another time or date.' });
+    if (!isRangeAvailable(start, end)) return setMessage({ type: 'error', text: 'One or more selected hours are no longer available. Refresh the slot list and try again.' });
     setBooking(true);
     try {
       const { data } = await http.post('/bookings', form);
-      if (data.mockPayment) await confirmMockBooking(data);
-      else await openRazorpay(data);
+      if (data.mockPayment) await confirmMockBooking(data); else await openRazorpay(data);
       setForm((prev) => ({ ...prev, notes: '' }));
-      const refreshed = await http.get('/bookings/availability', { params: { turfId: form.turfId, date: form.date } });
-      setAvailability(refreshed.data);
-    } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.message || error.message || 'Booking failed. Please try again.' });
-    } finally {
-      setBooking(false);
-    }
+      await refreshAvailability();
+    } catch (error) { setMessage({ type: 'error', text: error.response?.data?.message || error.message || 'Booking failed. Please try again.' }); }
+    finally { setBooking(false); }
   };
 
   const setTurf = (turfId) => {
@@ -180,15 +139,12 @@ export default function HomePage() {
       </section>
 
       <section>
-        <div className="mb-4 flex items-end justify-between">
-          <div><h2 className="text-2xl font-bold">Available turfs</h2><p className="text-sm text-gray-500 dark:text-gray-400">Choose the pitch that fits your game.</p></div>
-        </div>
+        <div className="mb-4"><h2 className="text-2xl font-bold">Available turfs</h2><p className="text-sm text-gray-500 dark:text-gray-400">Choose the pitch that fits your game.</p></div>
         {loading ? <div className="grid gap-4 sm:grid-cols-2"><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /></div> : turfs.length === 0 ? <div className="rounded-2xl border border-dashed p-8 text-center text-gray-500">No active turfs are available right now.</div> : <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {turfs.map((turf) => <article key={turf._id} className="overflow-hidden rounded-2xl border bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-md dark:border-gray-800 dark:bg-gray-900">
-            <img src={turf.image || TURF_IMAGE_FALLBACK} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = TURF_IMAGE_FALLBACK; }} alt={turf.name} className="h-48 w-full object-cover" />
+            <img src={turf.image || TURF_IMAGE_FALLBACK} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = TURF_IMAGE_FALLBACK; }} alt={turf.name} className="h-48 w-full object-cover" />
             <div className="p-5"><div className="flex items-start justify-between gap-3"><h3 className="text-xl font-bold">{turf.name}</h3><span className="whitespace-nowrap rounded-full bg-green-50 px-2.5 py-1 text-sm font-bold text-green-700 dark:bg-green-950/40 dark:text-green-400">₹{turf.basePricePerHour}/hr</span></div>
-              <p className="mt-1 text-sm text-gray-500">📍 {turf.location}</p><p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{turf.description || 'Quality football turf for your next match.'}</p>
-              <p className="mt-3 text-xs font-medium text-gray-500">Open {formatHour(turf.availableHours?.start ?? 6)} – {formatHour(turf.availableHours?.end ?? 23)}</p>
+              <p className="mt-1 text-sm text-gray-500">📍 {turf.location}</p><p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{turf.description || 'Quality football turf for your next match.'}</p><p className="mt-3 text-xs font-medium text-gray-500">Open {formatHour(turf.availableHours?.start ?? 6)} – {formatHour(turf.availableHours?.end ?? 23)}</p>
             </div></article>)}
         </div>}
       </section>
@@ -198,12 +154,15 @@ export default function HomePage() {
         <form className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" onSubmit={handleBooking}>
           <label className="text-sm font-medium">Turf<select className="field mt-1" value={form.turfId} onChange={(e) => setTurf(e.target.value)} required>{turfs.map((t) => <option value={t._id} key={t._id}>{t.name}</option>)}</select></label>
           <label className="text-sm font-medium">Date<input type="date" min={minDate} className="field mt-1" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required /></label>
-          <label className="text-sm font-medium">Start time<select className="field mt-1" value={start} onChange={(e) => { const value = Number(e.target.value); const nextEnd = end > value && isRangeAvailable(value, end) ? end : value + 1; setForm({ ...form, startHour: value, endHour: nextEnd }); }} disabled={availabilityLoading || !startOptions.length} required>{startOptions.map((hour) => <option key={hour} value={hour}>{formatHour(hour)}</option>)}</select></label>
+          <label className="text-sm font-medium">Start time<select className="field mt-1" value={start} onChange={(e) => { const value = Number(e.target.value); setForm({ ...form, startHour: value, endHour: value + 1 }); }} disabled={availabilityLoading || !startOptions.length} required>{startOptions.map((hour) => <option key={hour} value={hour}>{formatHour(hour)}</option>)}</select></label>
           <label className="text-sm font-medium">End time<select className="field mt-1" value={end} onChange={(e) => setForm({ ...form, endHour: Number(e.target.value) })} disabled={availabilityLoading || !endOptions.length} required>{endOptions.map((hour) => <option key={hour} value={hour}>{formatHour(hour)}</option>)}</select></label>
           <label className="text-sm font-medium sm:col-span-2 lg:col-span-3">Notes (optional)<input className="field mt-1" placeholder="e.g. 10 players, league match" maxLength="200" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></label>
           <div className="flex items-end"><button disabled={booking || availabilityLoading || !turfs.length || !startOptions.length || !endOptions.length} className="w-full rounded-xl bg-green-600 px-5 py-3 font-bold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50">{booking ? 'Booking…' : `Continue • ₹${totalPrice}`}</button></div>
         </form>
-        {!availabilityLoading && availability && !startOptions.length && <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">No hourly slots are available for this date. Please choose another date.</p>}
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {!availabilityLoading && availability && !startOptions.length ? <p className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">No hourly slots are available for this date. Please choose another date.</p> : <p className="text-xs text-gray-500">Prices update automatically with the selected duration.</p>}
+          <button type="button" onClick={refreshAvailability} disabled={availabilityLoading || booking} className="shrink-0 rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-50">{availabilityLoading ? 'Checking…' : 'Refresh availability'}</button>
+        </div>
         {message.text && <div className={`mt-4 rounded-xl px-4 py-3 text-sm font-medium ${message.type === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-300' : 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'}`}>{message.text}</div>}
       </section>
     </div>
