@@ -7,6 +7,13 @@ const User = require('../models/User');
 const seed = async () => {
   await connectDb();
 
+  const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const adminPassword = String(process.env.ADMIN_PASSWORD || '');
+
+  if (!adminEmail || !adminPassword || adminPassword.length < 8) {
+    throw new Error('Set ADMIN_EMAIL and ADMIN_PASSWORD (minimum 8 characters) before running the seed script.');
+  }
+
   await Turf.deleteMany();
   await User.deleteMany({ role: 'admin' });
 
@@ -29,16 +36,19 @@ const seed = async () => {
     }
   ]);
 
-  const adminPassword = await bcrypt.hash('admin123', 10);
+  const hashedPassword = await bcrypt.hash(adminPassword, 12);
   await User.create({
     name: 'Admin User',
-    email: 'admin@turf.com',
-    password: adminPassword,
+    email: adminEmail,
+    password: hashedPassword,
     role: 'admin'
   });
 
-  console.log('Seed complete. Admin credentials: admin@turf.com / admin123');
+  console.log(`Seed complete. Admin account created for ${adminEmail}`);
   process.exit(0);
 };
 
-seed();
+seed().catch((error) => {
+  console.error('Seed failed:', error.message);
+  process.exit(1);
+});
