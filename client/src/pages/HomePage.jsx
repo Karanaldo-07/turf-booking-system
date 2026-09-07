@@ -1,78 +1,100 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import http from '../api/http';
 import { useAuth } from '../context/AuthContext';
 
+const formatHour = (hour) => {
+  const h = hour % 12 || 12;
+  return `${h}:00 ${hour < 12 ? 'AM' : 'PM'}`;
+};
+
 export default function HomePage() {
   const [turfs, setTurfs] = useState([]);
-  const [form, setForm] = useState({ turfId: '', date: '', startHour: 18, endHour: 19 });
-  const [message, setMessage] = useState('');
+  const [form, setForm] = useState({ turfId: '', date: '', startHour: 18, endHour: 19, notes: '' });
+  const [message, setMessage] = useState({ type: '', text: '' });
+  const [loading, setLoading] = useState(true);
+  const [booking, setBooking] = useState(false);
   const { user } = useAuth();
 
   useEffect(() => {
-    http.get('/turfs').then((res) => {
-      setTurfs(res.data);
-      if (res.data[0]) setForm((prev) => ({ ...prev, turfId: res.data[0]._id }));
-    });
+    http.get('/turfs')
+      .then(({ data }) => {
+        setTurfs(data);
+        if (data[0]) setForm((prev) => ({ ...prev, turfId: data[0]._id, startHour: Math.max(18, data[0].availableHours?.start ?? 6) }));
+      })
+      .catch(() => setMessage({ type: 'error', text: 'Unable to load turfs. Please refresh.' }))
+      .finally(() => setLoading(false));
   }, []);
 
   const selectedTurf = useMemo(() => turfs.find((t) => t._id === form.turfId), [turfs, form.turfId]);
-  const totalPrice = selectedTurf ? (form.endHour - form.startHour) * selectedTurf.basePricePerHour : 0;
+  const start = Number(form.startHour);
+  const end = Number(form.endHour);
+  const totalPrice = selectedTurf && end > start ? (end - start) * selectedTurf.basePricePerHour : 0;
+  const minDate = new Date().toISOString().slice(0, 10);
 
   const handleBooking = async (e) => {
     e.preventDefault();
-    setMessage('');
-    if (!user) return setMessage('Please login to book a turf');
+    setMessage({ type: '', text: '' });
+    if (!user) return setMessage({ type: 'error', text: 'Please login or register before booking.' });
+    if (!selectedTurf || end <= start) return setMessage({ type: 'error', text: 'Please choose a valid time range.' });
 
+    setBooking(true);
     try {
       const { data } = await http.post('/bookings', form);
       const payment = await http.post('/bookings/confirm-payment', {
         bookingId: data.booking._id,
-        razorpayPaymentId: `simulated_${Date.now()}`
+        razorpayPaymentId: data.order?.mock ? undefined : `web_${Date.now()}`
       });
-      setMessage(payment.data.message);
+      setMessage({ type: 'success', text: payment.data.message });
+      setForm((prev) => ({ ...prev, notes: '' }));
     } catch (error) {
-      setMessage(error.response?.data?.message || 'Booking failed');
+      setMessage({ type: 'error', text: error.response?.data?.message || 'Booking failed. Please try again.' });
+    } finally {
+      setBooking(false);
     }
   };
 
+  const setTurf = (turfId) => {
+    const turf = turfs.find((t) => t._id === turfId);
+    const startHour = Math.max(18, turf?.availableHours?.start ?? 6);
+    setForm((prev) => ({ ...prev, turfId, startHour, endHour: Math.min(startHour + 1, turf?.availableHours?.end ?? 23) }));
+  };
+
   return (
-    <div className="space-y-6">
-      <section className="bg-gradient-to-r from-green-700 to-black text-white rounded-2xl p-6">
-        <h1 className="text-3xl font-bold">Book Your Next Football Match</h1>
-        <p className="opacity-90 mt-2">Find premium turfs, pick slots, and confirm instantly.</p>
+    <div className="space-y-8 pb-8">
+      <section className="relative overflow-hidden rounded-3xl bg-gray-950 px-6 py-12 text-white sm:px-10">
+        <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-green-500/20 blur-3xl" />
+        <p className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-green-400">Turf Booking</p>
+        <h1 className="max-w-2xl text-4xl font-black tracking-tight sm:text-5xl">Your game. Your slot. Your turf.</h1>
+        <p className="mt-4 max-w-xl text-gray-300">Find a pitch, choose a time, and get your match booked in minutes.</p>
+        {!user && <Link to="/register" className="mt-7 inline-flex rounded-xl bg-green-600 px-5 py-3 font-semibold hover:bg-green-500">Create free account</Link>}
       </section>
 
-      <section className="grid md:grid-cols-2 gap-4">
-        {turfs.map((turf) => (
-          <article key={turf._id} className="bg-white dark:bg-gray-900 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-800">
-            <img src={turf.image} alt={turf.name} className="h-44 w-full object-cover" />
-            <div className="p-4">
-              <h3 className="font-semibold text-xl">{turf.name}</h3>
-              <p className="text-sm text-gray-600 dark:text-gray-300">{turf.location}</p>
-              <p className="text-sm mt-2">{turf.description}</p>
-              <p className="mt-3 text-pitch font-semibold">₹{turf.basePricePerHour} / hour</p>
-            </div>
-          </article>
-        ))}
+      <section>
+        <div className="mb-4 flex items-end justify-between">
+          <div><h2 className="text-2xl font-bold">Available turfs</h2><p className="text-sm text-gray-500 dark:text-gray-400">Choose the pitch that fits your game.</p></div>
+        </div>
+        {loading ? <div className="grid gap-4 sm:grid-cols-2"><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /></div> : turfs.length === 0 ? <div className="rounded-2xl border border-dashed p-8 text-center text-gray-500">No active turfs are available right now.</div> : <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {turfs.map((turf) => <article key={turf._id} className="overflow-hidden rounded-2xl border bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-md dark:border-gray-800 dark:bg-gray-900">
+            <img src={turf.image || 'https://images.unsplash.com/photo-1526232761682-d26e03ac148e?auto=format&fit=crop&w=900&q=80'} alt={turf.name} className="h-48 w-full object-cover" />
+            <div className="p-5"><div className="flex items-start justify-between gap-3"><h3 className="text-xl font-bold">{turf.name}</h3><span className="whitespace-nowrap rounded-full bg-green-50 px-2.5 py-1 text-sm font-bold text-green-700 dark:bg-green-950/40 dark:text-green-400">₹{turf.basePricePerHour}/hr</span></div>
+              <p className="mt-1 text-sm text-gray-500">📍 {turf.location}</p><p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{turf.description || 'Quality football turf for your next match.'}</p>
+              <p className="mt-3 text-xs font-medium text-gray-500">Open {formatHour(turf.availableHours?.start ?? 6)} – {formatHour(turf.availableHours?.end ?? 23)}</p>
+            </div></article>)}
+        </div>}
       </section>
 
-      <section className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4">
-        <h2 className="text-2xl font-semibold mb-4">Create Booking</h2>
-        <form className="grid md:grid-cols-4 gap-3" onSubmit={handleBooking}>
-          <select className="p-2 rounded bg-gray-100 dark:bg-gray-800" value={form.turfId} onChange={(e) => setForm({ ...form, turfId: e.target.value })}>
-            {turfs.map((t) => (
-              <option value={t._id} key={t._id}>{t.name}</option>
-            ))}
-          </select>
-          <input type="date" className="p-2 rounded bg-gray-100 dark:bg-gray-800" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required />
-          <input type="number" min="0" max="23" className="p-2 rounded bg-gray-100 dark:bg-gray-800" value={form.startHour} onChange={(e) => setForm({ ...form, startHour: Number(e.target.value) })} />
-          <input type="number" min="1" max="24" className="p-2 rounded bg-gray-100 dark:bg-gray-800" value={form.endHour} onChange={(e) => setForm({ ...form, endHour: Number(e.target.value) })} />
-          <div className="md:col-span-4 flex items-center justify-between">
-            <p>Estimated Price: <strong>₹{Number.isFinite(totalPrice) ? totalPrice : 0}</strong></p>
-            <button className="px-4 py-2 rounded-lg bg-pitch text-white">Pay & Confirm</button>
-          </div>
+      <section className="rounded-2xl border bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900 sm:p-7">
+        <div className="mb-6"><h2 className="text-2xl font-bold">Book a slot</h2><p className="text-sm text-gray-500 dark:text-gray-400">Pick a date and hourly slot. Overlapping bookings are blocked automatically.</p></div>
+        <form className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" onSubmit={handleBooking}>
+          <label className="text-sm font-medium">Turf<select className="field mt-1" value={form.turfId} onChange={(e) => setTurf(e.target.value)} required>{turfs.map((t) => <option value={t._id} key={t._id}>{t.name}</option>)}</select></label>
+          <label className="text-sm font-medium">Date<input type="date" min={minDate} className="field mt-1" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required /></label>
+          <label className="text-sm font-medium">Start time<select className="field mt-1" value={form.startHour} onChange={(e) => { const value = Number(e.target.value); setForm({ ...form, startHour: value, endHour: Math.max(value + 1, Number(form.endHour)) }); }}>{Array.from({ length: Math.max(0, (selectedTurf?.availableHours?.end ?? 23) - (selectedTurf?.availableHours?.start ?? 6)) }, (_, i) => (selectedTurf?.availableHours?.start ?? 6) + i).map((h) => <option key={h} value={h}>{formatHour(h)}</option>)}</select></label>
+          <label className="text-sm font-medium">End time<select className="field mt-1" value={form.endHour} onChange={(e) => setForm({ ...form, endHour: Number(e.target.value) })}>{Array.from({ length: Math.max(0, (selectedTurf?.availableHours?.end ?? 23) - start) }, (_, i) => start + 1 + i).map((h) => <option key={h} value={h}>{formatHour(h)}</option>)}</select></label>
+          <label className="text-sm font-medium sm:col-span-2 lg:col-span-3">Notes (optional)<input className="field mt-1" placeholder="e.g. 10 players, league match" maxLength="200" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></label>
+          <div className="flex items-end"><button disabled={booking || !turfs.length} className="w-full rounded-xl bg-green-600 px-5 py-3 font-bold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50">{booking ? 'Booking…' : `Confirm • ₹${totalPrice}`}</button></div>
         </form>
-        {message && <p className="mt-3 text-sm text-pitch">{message}</p>}
+        {message.text && <div className={`mt-4 rounded-xl px-4 py-3 text-sm font-medium ${message.type === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-300' : 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'}`}>{message.text}</div>}
       </section>
     </div>
   );
