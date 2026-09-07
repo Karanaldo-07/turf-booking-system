@@ -9,6 +9,7 @@ const bookingSchema = new mongoose.Schema(
     endHour: { type: Number, required: true },
     duration: { type: Number, required: true },
     totalPrice: { type: Number, required: true },
+    slotKeys: { type: [String], default: undefined },
     status: {
       type: String,
       enum: ['pending', 'approved', 'cancelled'],
@@ -21,9 +22,23 @@ const bookingSchema = new mongoose.Schema(
     },
     razorpayOrderId: { type: String },
     razorpayPaymentId: { type: String },
-    notes: { type: String }
+    notes: { type: String, trim: true, maxlength: 200 },
+    expiresAt: { type: Date }
   },
   { timestamps: true }
 );
+
+// Each booking reserves every one-hour slot it covers. The unique multikey index
+// makes concurrent booking attempts fail safely instead of relying only on a read check.
+bookingSchema.index(
+  { turf: 1, date: 1, slotKeys: 1 },
+  { unique: true, partialFilterExpression: { slotKeys: { $exists: true, $ne: [] } } }
+);
+bookingSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, partialFilterExpression: { status: 'pending' } }
+);
+bookingSchema.index({ user: 1, createdAt: -1 });
+bookingSchema.index({ turf: 1, date: 1 });
 
 module.exports = mongoose.model('Booking', bookingSchema);
