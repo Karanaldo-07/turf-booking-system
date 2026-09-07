@@ -3,6 +3,8 @@ const Razorpay = require('razorpay');
 const Booking = require('../models/Booking');
 const Turf = require('../models/Turf');
 
+const BOOKING_HOLD_MINUTES = 15;
+
 const getMyBookings = async (req, res) => {
   const bookings = await Booking.find({ user: req.user._id }).populate('turf').sort({ createdAt: -1 });
   res.json(bookings);
@@ -20,7 +22,7 @@ const createBooking = async (req, res) => {
   const start = Number(startHour);
   const end = Number(endHour);
 
-  if (!date || !turfId || !Number.isInteger(start) || !Number.isInteger(end) || start >= end) {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !turfId || !Number.isInteger(start) || !Number.isInteger(end) || start >= end) {
     return res.status(400).json({ message: 'Please select a valid date and time range' });
   }
 
@@ -38,16 +40,23 @@ const createBooking = async (req, res) => {
   }
 
   const conflicts = await Booking.find({ turf: turfId, date, status: { $ne: 'cancelled' } });
-  if (conflicts.some((b) => hasOverlap(start, end, b.startHour, b.endHour))) {
+  if (conflicts.some((booking) => hasOverlap(start, end, booking.startHour, booking.endHour))) {
     return res.status(409).json({ message: 'Selected slot is already booked. Please choose another time.' });
   }
 
   const duration = end - start;
-  const totalPrice = duration * turf.basePricePerHour;
-  let order;
+  const totalPrice = Math.round(duration * turf.basePricePerHour * 100) / 100;
+  const slotKeys = Array.from({ length: duration }, (_, index) => `${turfId}:${date}:${start + index}`);
 
-  if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
-    const razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+  let order;
+  const razorpayConfigured = Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+  const allowMockPayments = process.env.ALLOW_MOCK_PAYMENTS === 'true';
+
+  if (razorpayConfigured) {
+    const razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET
+    });
     try {
       order = await razorpay.orders.create({
         amount: Math.round(totalPrice * 100),
@@ -57,35 +66,52 @@ const createBooking = async (req, res) => {
     } catch (_error) {
       return res.status(502).json({ message: 'Payment service is temporarily unavailable. Please try again.' });
     }
+  } else if (allowMockPayments) {
+    order = { id: `mock_order_${Date.now()}`, mock: true, amount: Math.round(totalPrice * 100), currency: 'INR' };
   } else {
-    order = { id: `mock_order_${Date.now()}`, mock: true };
+    return res.status(503).json({ message: 'Online payments are not configured yet.' });
   }
 
-  const booking = await Booking.create({
-    user: req.user._id,
-    turf: turfId,
-    date,
-    startHour: start,
-    endHour: end,
-    duration,
-    totalPrice,
-    notes: notes?.trim(),
-    razorpayOrderId: order.id,
-    status: 'pending',
-    paymentStatus: 'pending'
-  });
+  try {
+    const booking = await Booking.create({
+      user: req.user._id,
+      turf: turfId,
+      date,
+      startHour: start,
+      endHour: end,
+      duration,
+      totalPrice,
+      slotKeys,
+      notes: typeof notes === 'string' ? notes.trim() : undefined,
+      razorpayOrderId: order.id,
+      status: 'pending',
+      paymentStatus: 'pending',
+      expiresAt: new Date(Date.now() + BOOKING_HOLD_MINUTES * 60 * 1000)
+    });
 
-  res.status(201).json({
-    booking,
-    order,
-    mockPayment: Boolean(order.mock),
-    razorpayKeyId: process.env.RAZORPAY_KEY_ID || null
-  });
+    res.status(201).json({
+      booking,
+      order,
+      mockPayment: Boolean(order.mock),
+      razorpayKeyId: process.env.RAZORPAY_KEY_ID || null
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ message: 'Selected slot was just booked by someone else. Please choose another time.' });
+    }
+    throw error;
+  }
+};
+
+const safeEqual = (a, b) => {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
 };
 
 const confirmPayment = async (req, res) => {
   const { bookingId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
-  const booking = await Booking.findById(bookingId).populate('turf').populate('user', 'name email');
+  const booking = await Booking.findById(bookingId).populate('turf').populate('user', 'name email phone');
 
   if (!booking) return res.status(404).json({ message: 'Booking not found' });
   if (String(booking.user._id) !== String(req.user._id) && req.user.role !== 'admin') {
@@ -93,29 +119,62 @@ const confirmPayment = async (req, res) => {
   }
   if (booking.status === 'cancelled') return res.status(400).json({ message: 'This booking has been cancelled' });
   if (booking.paymentStatus === 'paid') return res.json({ message: `Booking confirmed for ${booking.turf.name}`, booking });
+  if (booking.expiresAt && booking.expiresAt <= new Date()) {
+    booking.status = 'cancelled';
+    booking.slotKeys = [];
+    await booking.save();
+    return res.status(410).json({ message: 'This booking hold expired. Please select the slot again.' });
+  }
 
   const isMock = booking.razorpayOrderId?.startsWith('mock_order_');
   if (isMock) {
-    if (process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_SECRET) {
-      return res.status(400).json({ message: 'Mock payment is disabled while Razorpay is configured.' });
+    if (process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+      return res.status(400).json({ message: 'Mock payment is disabled.' });
+    }
+    if (razorpayOrderId !== booking.razorpayOrderId) {
+      return res.status(400).json({ message: 'Invalid payment order.' });
     }
     booking.razorpayPaymentId = razorpayPaymentId || `mock_payment_${Date.now()}`;
   } else {
     if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature || razorpayOrderId !== booking.razorpayOrderId) {
       return res.status(400).json({ message: 'Missing or invalid payment details.' });
     }
+    if (!process.env.RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({ message: 'Payment verification is not configured.' });
+    }
+
     const expectedSignature = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+      .update(`${booking.razorpayOrderId}|${razorpayPaymentId}`)
       .digest('hex');
-    if (expectedSignature !== razorpaySignature) {
+
+    if (!safeEqual(expectedSignature, razorpaySignature)) {
       return res.status(400).json({ message: 'Payment verification failed.' });
     }
+
+    try {
+      const razorpay = new Razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET
+      });
+      const payment = await razorpay.payments.fetch(razorpayPaymentId);
+      const expectedAmount = Math.round(booking.totalPrice * 100);
+      if (payment.order_id !== booking.razorpayOrderId || Number(payment.amount) !== expectedAmount || payment.currency !== 'INR') {
+        return res.status(400).json({ message: 'Payment amount or order verification failed.' });
+      }
+      if (!['captured', 'authorized'].includes(payment.status)) {
+        return res.status(400).json({ message: `Payment is not completed (${payment.status}).` });
+      }
+    } catch (_error) {
+      return res.status(502).json({ message: 'Unable to verify payment status right now. Please try again.' });
+    }
+
     booking.razorpayPaymentId = razorpayPaymentId;
   }
 
   booking.paymentStatus = 'paid';
   booking.status = 'approved';
+  booking.expiresAt = null;
   await booking.save();
 
   res.json({ message: `Booking confirmed for ${booking.turf.name}`, booking });
@@ -127,6 +186,8 @@ const cancelMyBooking = async (req, res) => {
   if (booking.status === 'cancelled') return res.status(400).json({ message: 'Booking is already cancelled' });
 
   booking.status = 'cancelled';
+  booking.slotKeys = [];
+  booking.expiresAt = null;
   await booking.save();
   res.json({ message: 'Booking cancelled successfully', booking });
 };
@@ -140,6 +201,12 @@ const updateBookingStatus = async (req, res) => {
   if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
   booking.status = status;
+  if (status === 'cancelled') {
+    booking.slotKeys = [];
+    booking.expiresAt = null;
+  } else if (status === 'approved') {
+    booking.expiresAt = null;
+  }
   await booking.save();
   res.json(booking);
 };
