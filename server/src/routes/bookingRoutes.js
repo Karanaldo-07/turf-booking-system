@@ -2,6 +2,7 @@ const express = require('express');
 const {
   getMyBookings,
   getAllBookings,
+  getAvailability,
   createBooking,
   confirmPayment,
   cancelMyBooking,
@@ -12,6 +13,7 @@ const asyncHandler = require('../utils/asyncHandler');
 
 const router = express.Router();
 
+router.get('/availability', asyncHandler(getAvailability));
 router.get('/me', protect, asyncHandler(getMyBookings));
 router.get('/admin/all', protect, adminOnly, asyncHandler(getAllBookings));
 router.post('/', protect, asyncHandler(createBooking));
