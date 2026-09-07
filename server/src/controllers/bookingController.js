@@ -17,9 +17,7 @@ const getAllBookings = async (_req, res) => {
 
 const getAvailability = async (req, res) => {
   const { turfId, date } = req.query;
-  if (!turfId || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return res.status(400).json({ message: 'Turf and date are required.' });
-  }
+  if (!turfId || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'Turf and date are required.' });
 
   const turf = await Turf.findById(turfId).select('availableHours isActive');
   if (!turf || !turf.isActive) return res.status(404).json({ message: 'Turf unavailable' });
@@ -29,10 +27,7 @@ const getAvailability = async (req, res) => {
     turf: turfId,
     date,
     status: { $ne: 'cancelled' },
-    $or: [
-      { status: 'approved' },
-      { status: 'pending', expiresAt: { $gt: now } }
-    ]
+    $or: [{ status: 'approved' }, { status: 'pending', expiresAt: { $gt: now } }]
   }).select('startHour endHour');
 
   const bookedHours = new Set();
@@ -45,13 +40,7 @@ const getAvailability = async (req, res) => {
     if (!bookedHours.has(hour)) availableHours.push(hour);
   }
 
-  res.json({
-    turfId,
-    date,
-    availableHours,
-    bookedHours: [...bookedHours].sort((a, b) => a - b),
-    openingHours: turf.availableHours
-  });
+  res.json({ turfId, date, availableHours, bookedHours: [...bookedHours].sort((a, b) => a - b), openingHours: turf.availableHours });
 };
 
 const hasOverlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
@@ -61,27 +50,29 @@ const createBooking = async (req, res) => {
   const start = Number(startHour);
   const end = Number(endHour);
 
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !turfId || !Number.isInteger(start) || !Number.isInteger(end) || start >= end) {
-    return res.status(400).json({ message: 'Please select a valid date and time range' });
-  }
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !turfId || !Number.isInteger(start) || !Number.isInteger(end) || start >= end) return res.status(400).json({ message: 'Please select a valid date and time range' });
 
   const selectedDate = new Date(`${date}T00:00:00`);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  if (Number.isNaN(selectedDate.getTime()) || selectedDate < today) {
-    return res.status(400).json({ message: 'Booking date cannot be in the past' });
-  }
+  if (Number.isNaN(selectedDate.getTime()) || selectedDate < today) return res.status(400).json({ message: 'Booking date cannot be in the past' });
 
   const turf = await Turf.findById(turfId);
   if (!turf || !turf.isActive) return res.status(404).json({ message: 'Turf unavailable' });
-  if (start < turf.availableHours.start || end > turf.availableHours.end) {
-    return res.status(400).json({ message: `This turf is available from ${turf.availableHours.start}:00 to ${turf.availableHours.end}:00` });
-  }
+  if (start < turf.availableHours.start || end > turf.availableHours.end) return res.status(400).json({ message: `This turf is available from ${turf.availableHours.start}:00 to ${turf.availableHours.end}:00` });
 
-  const conflicts = await Booking.find({ turf: turfId, date, status: { $ne: 'cancelled' } });
-  if (conflicts.some((booking) => hasOverlap(start, end, booking.startHour, booking.endHour))) {
-    return res.status(409).json({ message: 'Selected slot is already booked. Please choose another time.' });
-  }
+  const now = new Date();
+  await Booking.updateMany(
+    { turf: turfId, date, status: 'pending', expiresAt: { $lte: now } },
+    { $set: { status: 'cancelled', slotKeys: [], expiresAt: null } }
+  );
+
+  const conflicts = await Booking.find({
+    turf: turfId,
+    date,
+    $or: [{ status: 'approved' }, { status: 'pending', expiresAt: { $gt: now } }]
+  });
+  if (conflicts.some((booking) => hasOverlap(start, end, booking.startHour, booking.endHour))) return res.status(409).json({ message: 'Selected slot is already booked. Please choose another time.' });
 
   const duration = end - start;
   const totalPrice = Math.round(duration * turf.basePricePerHour * 100) / 100;
@@ -105,22 +96,7 @@ const createBooking = async (req, res) => {
   }
 
   try {
-    const booking = await Booking.create({
-      user: req.user._id,
-      turf: turfId,
-      date,
-      startHour: start,
-      endHour: end,
-      duration,
-      totalPrice,
-      slotKeys,
-      notes: typeof notes === 'string' ? notes.trim() : undefined,
-      razorpayOrderId: order.id,
-      status: 'pending',
-      paymentStatus: 'pending',
-      expiresAt: new Date(Date.now() + BOOKING_HOLD_MINUTES * 60 * 1000)
-    });
-
+    const booking = await Booking.create({ user: req.user._id, turf: turfId, date, startHour: start, endHour: end, duration, totalPrice, slotKeys, notes: typeof notes === 'string' ? notes.trim() : undefined, razorpayOrderId: order.id, status: 'pending', paymentStatus: 'pending', expiresAt: new Date(Date.now() + BOOKING_HOLD_MINUTES * 60 * 1000) });
     res.status(201).json({ booking, order, mockPayment: Boolean(order.mock), razorpayKeyId: process.env.RAZORPAY_KEY_ID || null });
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ message: 'Selected slot was just booked by someone else. Please choose another time.' });
@@ -178,7 +154,6 @@ const confirmPayment = async (req, res) => {
   booking.status = 'approved';
   booking.expiresAt = null;
   await booking.save();
-
   res.json({ message: `Booking confirmed for ${booking.turf.name}`, booking });
 };
 
