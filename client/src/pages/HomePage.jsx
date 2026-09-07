@@ -23,6 +23,8 @@ const loadRazorpay = () => new Promise((resolve, reject) => {
   document.body.appendChild(script);
 });
 
+const TURF_IMAGE_FALLBACK = '/turf-placeholder.svg';
+
 export default function HomePage() {
   const [turfs, setTurfs] = useState([]);
   const [availability, setAvailability] = useState(null);
@@ -183,7 +185,7 @@ export default function HomePage() {
         </div>
         {loading ? <div className="grid gap-4 sm:grid-cols-2"><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /><div className="h-72 animate-pulse rounded-2xl bg-gray-200 dark:bg-gray-800" /></div> : turfs.length === 0 ? <div className="rounded-2xl border border-dashed p-8 text-center text-gray-500">No active turfs are available right now.</div> : <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {turfs.map((turf) => <article key={turf._id} className="overflow-hidden rounded-2xl border bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-md dark:border-gray-800 dark:bg-gray-900">
-            <img src={turf.image || 'https://images.unsplash.com/photo-1526232761682-d26e03ac148e?auto=format&fit=crop&w=900&q=80'} alt={turf.name} className="h-48 w-full object-cover" />
+            <img src={turf.image || TURF_IMAGE_FALLBACK} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = TURF_IMAGE_FALLBACK; }} alt={turf.name} className="h-48 w-full object-cover" />
             <div className="p-5"><div className="flex items-start justify-between gap-3"><h3 className="text-xl font-bold">{turf.name}</h3><span className="whitespace-nowrap rounded-full bg-green-50 px-2.5 py-1 text-sm font-bold text-green-700 dark:bg-green-950/40 dark:text-green-400">₹{turf.basePricePerHour}/hr</span></div>
               <p className="mt-1 text-sm text-gray-500">📍 {turf.location}</p><p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{turf.description || 'Quality football turf for your next match.'}</p>
               <p className="mt-3 text-xs font-medium text-gray-500">Open {formatHour(turf.availableHours?.start ?? 6)} – {formatHour(turf.availableHours?.end ?? 23)}</p>
