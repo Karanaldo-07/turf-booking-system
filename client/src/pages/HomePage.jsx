@@ -8,6 +8,15 @@ const formatHour = (hour) => {
   return `${h}:00 ${hour < 12 ? 'AM' : 'PM'}`;
 };
 
+const loadRazorpay = () => new Promise((resolve, reject) => {
+  if (window.Razorpay) return resolve(true);
+  const script = document.createElement('script');
+  script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+  script.onload = () => resolve(true);
+  script.onerror = () => reject(new Error('Unable to load payment checkout.'));
+  document.body.appendChild(script);
+});
+
 export default function HomePage() {
   const [turfs, setTurfs] = useState([]);
   const [form, setForm] = useState({ turfId: '', date: '', startHour: 18, endHour: 19, notes: '' });
@@ -32,6 +41,54 @@ export default function HomePage() {
   const totalPrice = selectedTurf && end > start ? (end - start) * selectedTurf.basePricePerHour : 0;
   const minDate = new Date().toISOString().slice(0, 10);
 
+  const confirmMockBooking = async (bookingData) => {
+    const payment = await http.post('/bookings/confirm-payment', {
+      bookingId: bookingData.booking._id,
+      razorpayOrderId: bookingData.order.id,
+      razorpayPaymentId: `mock_payment_${Date.now()}`
+    });
+    setMessage({ type: 'success', text: payment.data.message });
+  };
+
+  const openRazorpay = async (bookingData) => {
+    await loadRazorpay();
+    if (!bookingData.razorpayKeyId) throw new Error('Payment configuration is missing.');
+
+    await new Promise((resolve, reject) => {
+      const checkout = new window.Razorpay({
+        key: bookingData.razorpayKeyId,
+        amount: bookingData.order.amount,
+        currency: bookingData.order.currency,
+        name: 'Turf Booking',
+        description: `${selectedTurf.name} • ${bookingData.booking.duration} hour(s)`,
+        order_id: bookingData.order.id,
+        prefill: {
+          name: user?.name || '',
+          email: user?.email || '',
+          contact: user?.phone || ''
+        },
+        theme: { color: '#16a34a' },
+        handler: async (response) => {
+          try {
+            const payment = await http.post('/bookings/confirm-payment', {
+              bookingId: bookingData.booking._id,
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature
+            });
+            setMessage({ type: 'success', text: payment.data.message });
+            resolve();
+          } catch (error) {
+            reject(new Error(error.response?.data?.message || 'Payment verification failed.'));
+          }
+        },
+        modal: { ondismiss: () => reject(new Error('Payment was cancelled. Your slot is still pending and has not been confirmed.')) }
+      });
+      checkout.on('payment.failed', (response) => reject(new Error(response.error?.description || 'Payment failed.')));
+      checkout.open();
+    });
+  };
+
   const handleBooking = async (e) => {
     e.preventDefault();
     setMessage({ type: '', text: '' });
@@ -41,14 +98,11 @@ export default function HomePage() {
     setBooking(true);
     try {
       const { data } = await http.post('/bookings', form);
-      const payment = await http.post('/bookings/confirm-payment', {
-        bookingId: data.booking._id,
-        razorpayPaymentId: data.order?.mock ? undefined : `web_${Date.now()}`
-      });
-      setMessage({ type: 'success', text: payment.data.message });
+      if (data.mockPayment) await confirmMockBooking(data);
+      else await openRazorpay(data);
       setForm((prev) => ({ ...prev, notes: '' }));
     } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.message || 'Booking failed. Please try again.' });
+      setMessage({ type: 'error', text: error.response?.data?.message || error.message || 'Booking failed. Please try again.' });
     } finally {
       setBooking(false);
     }
@@ -92,7 +146,7 @@ export default function HomePage() {
           <label className="text-sm font-medium">Start time<select className="field mt-1" value={form.startHour} onChange={(e) => { const value = Number(e.target.value); setForm({ ...form, startHour: value, endHour: Math.max(value + 1, Number(form.endHour)) }); }}>{Array.from({ length: Math.max(0, (selectedTurf?.availableHours?.end ?? 23) - (selectedTurf?.availableHours?.start ?? 6)) }, (_, i) => (selectedTurf?.availableHours?.start ?? 6) + i).map((h) => <option key={h} value={h}>{formatHour(h)}</option>)}</select></label>
           <label className="text-sm font-medium">End time<select className="field mt-1" value={form.endHour} onChange={(e) => setForm({ ...form, endHour: Number(e.target.value) })}>{Array.from({ length: Math.max(0, (selectedTurf?.availableHours?.end ?? 23) - start) }, (_, i) => start + 1 + i).map((h) => <option key={h} value={h}>{formatHour(h)}</option>)}</select></label>
           <label className="text-sm font-medium sm:col-span-2 lg:col-span-3">Notes (optional)<input className="field mt-1" placeholder="e.g. 10 players, league match" maxLength="200" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></label>
-          <div className="flex items-end"><button disabled={booking || !turfs.length} className="w-full rounded-xl bg-green-600 px-5 py-3 font-bold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50">{booking ? 'Booking…' : `Confirm • ₹${totalPrice}`}</button></div>
+          <div className="flex items-end"><button disabled={booking || !turfs.length} className="w-full rounded-xl bg-green-600 px-5 py-3 font-bold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50">{booking ? 'Booking…' : `Continue • ₹${totalPrice}`}</button></div>
         </form>
         {message.text && <div className={`mt-4 rounded-xl px-4 py-3 text-sm font-medium ${message.type === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-300' : 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'}`}>{message.text}</div>}
       </section>
