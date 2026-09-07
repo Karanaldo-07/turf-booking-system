@@ -4,6 +4,36 @@ const Booking = require('../models/Booking');
 const Turf = require('../models/Turf');
 
 const BOOKING_HOLD_MINUTES = 15;
+const MIN_BOOKING_LEAD_MINUTES = 60;
+const BOOKING_TIME_ZONE = process.env.BOOKING_TIME_ZONE || 'Asia/Kolkata';
+
+const getBookingNow = () => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BOOKING_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date()).reduce((result, part) => {
+    if (part.type !== 'literal') result[part.type] = part.value;
+    return result;
+  }, {});
+
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour),
+    minute: Number(parts.minute)
+  };
+};
+
+const getMinimumStartHour = (date) => {
+  const now = getBookingNow();
+  if (date !== now.date) return null;
+  const minutesSinceMidnight = now.hour * 60 + now.minute;
+  return Math.floor((minutesSinceMidnight + MIN_BOOKING_LEAD_MINUTES + 59) / 60);
+};
 
 const getMyBookings = async (req, res) => {
   const bookings = await Booking.find({ user: req.user._id }).populate('turf').sort({ createdAt: -1 });
@@ -35,9 +65,10 @@ const getAvailability = async (req, res) => {
     for (let hour = booking.startHour; hour < booking.endHour; hour += 1) bookedHours.add(hour);
   });
 
+  const minimumStartHour = getMinimumStartHour(date);
   const availableHours = [];
   for (let hour = turf.availableHours.start; hour < turf.availableHours.end; hour += 1) {
-    if (!bookedHours.has(hour)) availableHours.push(hour);
+    if (!bookedHours.has(hour) && (minimumStartHour === null || hour >= minimumStartHour)) availableHours.push(hour);
   }
 
   res.json({ turfId, date, availableHours, bookedHours: [...bookedHours].sort((a, b) => a - b), openingHours: turf.availableHours });
@@ -56,6 +87,9 @@ const createBooking = async (req, res) => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   if (Number.isNaN(selectedDate.getTime()) || selectedDate < today) return res.status(400).json({ message: 'Booking date cannot be in the past' });
+
+  const minimumStartHour = getMinimumStartHour(date);
+  if (minimumStartHour !== null && start < minimumStartHour) return res.status(400).json({ message: `For today, bookings must start at least ${MIN_BOOKING_LEAD_MINUTES} minutes from now.` });
 
   const turf = await Turf.findById(turfId);
   if (!turf || !turf.isActive) return res.status(404).json({ message: 'Turf unavailable' });
