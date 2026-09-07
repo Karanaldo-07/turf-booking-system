@@ -8,54 +8,69 @@ const getMyBookings = async (req, res) => {
 };
 
 const getAllBookings = async (_req, res) => {
-  const bookings = await Booking.find().populate('user', 'name email').populate('turf').sort({ createdAt: -1 });
+  const bookings = await Booking.find().populate('user', 'name email phone').populate('turf').sort({ createdAt: -1 });
   res.json(bookings);
 };
 
 const hasOverlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
 
 const createBooking = async (req, res) => {
-  const { turfId, date, startHour, endHour } = req.body;
-  if (!date || startHour >= endHour) {
-    return res.status(400).json({ message: 'Invalid date or time range' });
+  const { turfId, date, startHour, endHour, notes } = req.body;
+  const start = Number(startHour);
+  const end = Number(endHour);
+
+  if (!date || !turfId || !Number.isInteger(start) || !Number.isInteger(end) || start >= end) {
+    return res.status(400).json({ message: 'Please select a valid date and time range' });
+  }
+
+  const selectedDate = new Date(`${date}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (Number.isNaN(selectedDate.getTime()) || selectedDate < today) {
+    return res.status(400).json({ message: 'Booking date cannot be in the past' });
   }
 
   const turf = await Turf.findById(turfId);
   if (!turf || !turf.isActive) return res.status(404).json({ message: 'Turf unavailable' });
+  if (start < turf.availableHours.start || end > turf.availableHours.end) {
+    return res.status(400).json({ message: `This turf is available from ${turf.availableHours.start}:00 to ${turf.availableHours.end}:00` });
+  }
 
   const conflicts = await Booking.find({ turf: turfId, date, status: { $ne: 'cancelled' } });
-  const blocked = conflicts.some((b) => hasOverlap(startHour, endHour, b.startHour, b.endHour));
-  if (blocked) return res.status(400).json({ message: 'Selected slot already booked' });
+  if (conflicts.some((b) => hasOverlap(start, end, b.startHour, b.endHour))) {
+    return res.status(409).json({ message: 'Selected slot is already booked. Please choose another time.' });
+  }
 
-  const duration = endHour - startHour;
+  const duration = end - start;
   const totalPrice = duration * turf.basePricePerHour;
+  let order;
 
-  let order = null;
   if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
     const razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
     try {
-      order = await razorpay.orders.create({ amount: totalPrice * 100, currency: 'INR', receipt: `booking_${Date.now()}` });
+      order = await razorpay.orders.create({ amount: Math.round(totalPrice * 100), currency: 'INR', receipt: `booking_${Date.now()}` });
     } catch (_error) {
-      order = { id: `mock_order_${Date.now()}` };
+      return res.status(502).json({ message: 'Payment service is temporarily unavailable. Please try again.' });
     }
   } else {
-    order = { id: `mock_order_${Date.now()}` };
+    order = { id: `mock_order_${Date.now()}`, mock: true };
   }
 
   const booking = await Booking.create({
     user: req.user._id,
     turf: turfId,
     date,
-    startHour,
-    endHour,
+    startHour: start,
+    endHour: end,
     duration,
     totalPrice,
+    notes: notes?.trim(),
     razorpayOrderId: order.id,
     status: 'pending',
     paymentStatus: 'pending'
   });
 
-  res.status(201).json({ booking, order });
+  res.status(201).json({ booking, order, mockPayment: Boolean(order.mock) });
 };
 
 const confirmPayment = async (req, res) => {
@@ -66,33 +81,37 @@ const confirmPayment = async (req, res) => {
   if (String(booking.user._id) !== String(req.user._id) && req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Unauthorized booking access' });
   }
+  if (booking.status === 'cancelled') return res.status(400).json({ message: 'This booking has been cancelled' });
 
   booking.paymentStatus = 'paid';
   booking.status = 'approved';
   booking.razorpayPaymentId = razorpayPaymentId || `mock_payment_${Date.now()}`;
   await booking.save();
 
-  res.json({
-    message: `Booking confirmed for ${booking.turf.name}. Confirmation sent to ${booking.user.email}`,
-    booking
-  });
+  res.json({ message: `Booking confirmed for ${booking.turf.name}`, booking });
+};
+
+const cancelMyBooking = async (req, res) => {
+  const booking = await Booking.findOne({ _id: req.params.id, user: req.user._id });
+  if (!booking) return res.status(404).json({ message: 'Booking not found' });
+  if (booking.status === 'cancelled') return res.status(400).json({ message: 'Booking is already cancelled' });
+
+  booking.status = 'cancelled';
+  await booking.save();
+  res.json({ message: 'Booking cancelled successfully', booking });
 };
 
 const updateBookingStatus = async (req, res) => {
   const { status } = req.body;
+  if (!['pending', 'approved', 'cancelled'].includes(status)) {
+    return res.status(400).json({ message: 'Invalid booking status' });
+  }
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
   booking.status = status;
-  if (status === 'cancelled') booking.paymentStatus = 'failed';
   await booking.save();
   res.json(booking);
 };
 
-module.exports = {
-  getMyBookings,
-  getAllBookings,
-  createBooking,
-  confirmPayment,
-  updateBookingStatus
-};
+module.exports = { getMyBookings, getAllBookings, createBooking, confirmPayment, cancelMyBooking, updateBookingStatus };
