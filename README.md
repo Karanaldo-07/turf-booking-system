@@ -1,44 +1,58 @@
 # Football Turf Booking System
 
-Full-stack football turf booking platform with JWT auth, admin dashboard, booking conflict prevention, pricing controls, and Razorpay-compatible payment flow (with mock fallback).
+A full-stack, mobile-friendly football turf booking platform built with React, Express, MongoDB and Razorpay.
+
+## Features
+
+- User registration and login with JWT authentication
+- Responsive turf discovery and booking flow
+- Date and hourly slot selection
+- Server-side availability validation and double-booking protection
+- Temporary 15-minute booking holds while payment is completed
+- Razorpay order creation and server-side payment signature verification
+- Booking history and cancellation
+- Admin dashboard for turf and booking management
+- Turf activation/deactivation and pricing controls
+- MongoDB-backed data persistence
+- Production-oriented environment configuration
+- GitHub Actions CI for frontend builds and backend syntax checks
 
 ## Tech Stack
-- **Frontend:** React (Vite), Tailwind CSS, Axios, React Router
-- **Backend:** Node.js, Express.js
+
+- **Frontend:** React, Vite, Tailwind CSS, Axios, React Router
+- **Backend:** Node.js 22+, Express.js
 - **Database:** MongoDB + Mongoose
+- **Payments:** Razorpay Standard Checkout
+- **Authentication:** JWT + bcrypt
 
 ## Project Structure
-```
+
+```text
 .
-├── client
-└── server
+├── client/                 # React/Vite frontend
+├── server/                 # Express API
+│   ├── api/                # Vercel serverless entrypoint
+│   └── src/
+└── .github/workflows/      # CI checks
 ```
 
----
+## Local Setup
 
-## Run Locally (Step by Step)
+### Prerequisites
 
-### 0) Prerequisites
-Install these first:
-- Node.js **18+** and npm
-- MongoDB (local service or MongoDB Atlas URI)
+- Node.js **22.2+** and npm
+- MongoDB locally or a MongoDB Atlas connection string
 - Git
+- Razorpay test keys for real payment testing
 
-Optional (for real payments):
-- Razorpay test key ID and secret
+### 1. Clone
 
----
-
-### 1) Clone and enter the project
 ```bash
 git clone <your-repo-url>
 cd turf-booking-system
 ```
 
----
-
-### 2) Backend setup (`server`)
-Open terminal #1:
+### 2. Configure the backend
 
 ```bash
 cd server
@@ -46,39 +60,44 @@ cp .env.example .env
 npm install
 ```
 
-Now edit `server/.env` and confirm values:
+Set these values in `server/.env`:
 
 ```env
 PORT=5000
 MONGO_URI=mongodb://localhost:27017/turf_booking
-JWT_SECRET=replace_with_strong_secret
+JWT_SECRET=use-a-long-random-secret
 JWT_EXPIRES_IN=7d
-RAZORPAY_KEY_ID=rzp_test_example
-RAZORPAY_KEY_SECRET=replace_with_secret
+RAZORPAY_KEY_ID=rzp_test_your_key_id
+RAZORPAY_KEY_SECRET=your_razorpay_test_secret
+ALLOW_MOCK_PAYMENTS=false
 CLIENT_URL=http://localhost:5173
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=use-a-strong-password
 ```
 
-> If you do not have Razorpay keys yet, you can keep placeholders; booking still works using mock order fallback.
+Never commit `.env` or real API keys to GitHub.
 
-Seed initial data (sample turfs + admin):
+### 3. Seed sample data
 
 ```bash
 npm run seed
 ```
 
-Start backend dev server:
+The seed script creates sample turfs and an admin account using the `ADMIN_EMAIL` and `ADMIN_PASSWORD` values from your local environment.
+
+### 4. Start the API
 
 ```bash
 npm run dev
 ```
 
-Backend runs at: `http://localhost:5000`
+API: `http://localhost:5000`
+
 Health check: `http://localhost:5000/api/health`
 
----
+### 5. Configure the frontend
 
-### 3) Frontend setup (`client`)
-Open terminal #2:
+In a second terminal:
 
 ```bash
 cd client
@@ -86,75 +105,53 @@ cp .env.example .env
 npm install
 ```
 
-Ensure `client/.env` has:
+Set:
 
 ```env
 VITE_API_URL=http://localhost:5000/api
 ```
 
-Start frontend dev server:
+Start the frontend:
 
 ```bash
 npm run dev
 ```
 
-Frontend runs at: `http://localhost:5173`
+Open the Vite URL shown in the terminal, normally `http://localhost:5173`.
 
----
+## Payments
 
-### 4) Login credentials (seeded admin)
-After running `npm run seed` in `server`:
-- Email: `admin@turf.com`
-- Password: `admin123`
+The production flow is:
 
-Use this account to access `/admin`.
+1. The API validates the turf and selected slot.
+2. The API creates a Razorpay order.
+3. The frontend opens Razorpay Checkout.
+4. Razorpay returns payment details to the frontend.
+5. The API verifies the Razorpay signature and payment/order amount server-side.
+6. Only after successful verification is the booking marked paid and approved.
 
----
+Mock payments are disabled by default. For local UI-only development, set `ALLOW_MOCK_PAYMENTS=true`; never enable this in production.
 
-### 5) How to use the app quickly
-1. Register a normal user account from `/register`.
-2. Browse turfs on home page.
-3. Pick date/time slot and create booking.
-4. Booking gets payment-confirmed through simulated flow.
-5. Login as admin and manage turfs, prices, and booking status.
+## Deployment Plan
 
----
+Deployment is intentionally the final step after the GitHub project passes CI and the application has been tested end-to-end.
 
-## Common Troubleshooting
+Recommended production components:
 
-### npm install fails
-- Check Node/npm versions: `node -v && npm -v`
-- Clear npm cache: `npm cache clean --force`
-- Retry with clean install:
-  - delete `node_modules` and lockfile
-  - run `npm install` again
+- React frontend deployed on Vercel
+- Express API deployed as a Vercel serverless function or a dedicated Node service
+- MongoDB Atlas for production database
+- Razorpay Live/Test keys stored only as platform environment variables
 
-### MongoDB connection error
-- Ensure MongoDB service is running locally
-- Or set Atlas connection string in `MONGO_URI`
+No secrets should be stored in source control.
 
-### CORS / API not reachable
-- Confirm backend `CLIENT_URL=http://localhost:5173`
-- Confirm frontend `VITE_API_URL=http://localhost:5000/api`
-- Restart both servers after env changes
+## CI
 
----
+Every push to `main` runs:
 
-## Quick Start Commands (copy/paste)
+- frontend dependency installation
+- frontend production build
+- backend dependency installation
+- JavaScript syntax checks
 
-Terminal #1:
-```bash
-cd server
-cp .env.example .env
-npm install
-npm run seed
-npm run dev
-```
-
-Terminal #2:
-```bash
-cd client
-cp .env.example .env
-npm install
-npm run dev
-```
+See `.github/workflows/ci.yml`.
